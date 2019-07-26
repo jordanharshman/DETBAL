@@ -1,0 +1,928 @@
+---
+title: "Reaction Loop Check"
+author: "Jordan Harshman"
+date: "February 4, 2019"
+runtime: shiny
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+Input your reaction in the text box below. All forward reactions should have the "=" symbol in between reactants and products; all reversible reactions should have the "<=>" symbol between the reactants and products. Enter each mechanistic step on a new line. For example, the 28-step mechanism from Rauscher, Cseko, and Horvath's "On the Complexity of Kinetics and the Mechanism of the Thiosulfate - Periodate Reaction" in Inorganic Chemistry (2011, vol. 50, 5793-5802) would be entered as so:
+
+S2O32- + IO4- + H+ <=> S2O3OH- + IO3-<br />
+IO4- + S2O3OH- + H2O = HOI + 2SO42- + 2H+<br />
+IO4- + S2O3OH- + H2O = 2HSO3- + IO3- + H+<br />
+S2O32- + S2O3OH- + H+ = S4O62- + H2O<br />
+S2O32- + IO3- + 2H+ <=> S2O3OH- + HIO2<br />
+IO4- + HIO2 = 2IO3- + H+<br />
+IO4- + HOI = IO3- + HIO2<br />
+IO4- + I- + H+ = IO3- + HOI<br />
+IO3- + I- + 2H+ <=> I2O2 + H2O<br />
+I2 + I2O2 + 2H2O = 2HIO2 + 2I- + 2H+<br />
+HIO2 + I- + H+ = 2HOI<br />
+I2 + H2O <=> HOI + I- + H+<br />
+I2 + I- <=> I3-<br />
+HIO2 + I2 + H2O = IO3- + 2I- + 3H+<br />
+S2O32- + I2 = S2O3I- + I-<br />
+S2O3I- + H2O = S2O32- + HOI + H+<br />
+IO4- + S2O3I- + 2H2O = 2SO42- + I- + HOI + 3H+<br />
+S2O32- + HOI = S2O3OH- + I-<br />
+S2O3OH- + S2O3I- = S4O62- + HOI<br />
+HSO3- + I2 + H2O = SO42- + 2I- + 3H+<br />
+HSO3- + HOI = SO42- + I- + 2H+<br />
+IO4- + HSO3- = SO42- + IO3- + H+<br />
+S2O32- + HIO2 + H+ = S2O3OH- + HOI<br />
+2S2O3OH- + H2O = S2O32- + 2HSO3- + 2H+<br />
+S2O3OH- + IO3- + H2O = 2HSO3- + HIO2<br />
+S4O62- + I2 <=> S4O6I- + I-<br />
+S4O6I- + H2O = S2O3OH- + S2O3I- + H+<br />
+I- + S4O6I- = 2S2O3I-<br />
+
+```{r input, warning=FALSE}
+# load required packages
+suppressMessages(library(pracma))
+suppressMessages(library(linprog))
+suppressMessages(library(shiny))
+
+# place initial text box for reaction input
+textAreaInput("rxn", "Mechanism:", width = 500, height = 250)
+```
+
+First, if any reversible reactions are written as two separate irreversible reactions, they will be combined into one step. Those reactions affected are printed below. The resulting stoichiometry matrix is given here. PLEASE CHECK THIS TO VERIFY ACCURACY OF YOUR INPUT INFORMATION AND ALGORITHM.
+
+```{r rxnmat, warning=FALSE}
+# FUNCTIONS:
+#   revrxnmessage: This is a function scans for reversable reactions that were written as two irreversable reactions
+#     but never reported as one reversable reaction. It will find them, remove one of them, than then change the other
+#     to an equilibrium expression so that the rest of the code will run correctly. This section only leads to the 
+#     printed message that appears and does not affect the rest of the code.
+#     
+#   revrxnrem: This is a function scans for reversable reactions that were written as two irreversable reactions
+#     but never reported as one reversable reaction. It will find them, remove one of them, than then change the other
+#     to an equilibrium expression so that the rest of the code will run correctly. This section actually replaces the
+#     equilibrium expressions in the main reaction mechanism so that it can be used in later code.
+#     
+#   rxnmat: This is a function takes the input reaction mechanism and converts it into a reaction matrix
+
+revrxnmessage <- reactive({
+  rxnmech <- input$rxn # read the input mechanism reactively
+
+  # convert to data frame
+  rxnmech <- data.frame(Steps = unlist(strsplit(rxnmech, "\n")[[1]]), 
+                        stringsAsFactors = FALSE)
+  
+  indreactall <- matrix(rep("BLANK", 10*nrow(rxnmech)), nrow = nrow(rxnmech)) # store all reactants
+  indprodall <- matrix(rep("BLANK", 10*nrow(rxnmech)), nrow = nrow(rxnmech))  # store all products
+  
+  # The for loop that follows populates the previously created blank matrices for storing reactants and products
+  for(j in 1:nrow(rxnmech)){
+    reactprod <- data.frame(matrix(strsplit(rxnmech[j,], "<=> | =")[[1]], ncol = 2), 
+                          stringsAsFactors = FALSE) # split into reactants and products
+    names(reactprod) <- c("Reactants", "Products")  # rename variables
+    
+    indreact <- matrix(gsub(" ", "", strsplit(reactprod$Reactants[1], " \\+ ")[[1]]), nrow = 1) # split reactants
+                                                                                                #  into cells
+    indreact <- cbind(indreact, matrix(rep("BLANK", 10 - ncol(indreact)), nrow = 1)) # fill in empty cells with BLANK
+    indreactall[j,] <- indreact[1,] # write the row to the storage vector
+    
+    # same as above with products instead of reactants
+    indprod <- matrix(gsub(" ", "", strsplit(reactprod$Products[1], " \\+ ")[[1]]), nrow = 1)
+    indprod <- cbind(indprod, matrix(rep("BLANK", 10 - ncol(indprod)), nrow = 1))
+    indprodall[j,] <- indprod[1,]
+  }
+  
+  indspecies <- matrix(rep("BLANK", 10*nrow(indprodall)), ncol = 10) # store individual species
+  
+  # The for loop that follows populates the previously created blank matrix for storing all species
+  for(i in 1:nrow(indprodall)){
+    react <- indreactall[i,][indreactall[i,] != "BLANK"] # capture reactants
+    prod <- indprodall[i,][indprodall[i,] != "BLANK"]    # capture products
+    species <- c(react, prod)                            # combine
+    indspecies[i, 1:length(species)] <- species          # write to blank storage matrix
+  }
+  
+  revrows <- numeric(0) # store the reversable rows
+  
+  # The for loop that follows populates searches for reversable reactions written as two irreversable reactions
+  for(i in 1:nrow(indspecies)){
+    tomatch <- indspecies[i,]     # see if this "i" row of reactants and products matches any other row
+    
+    # The for loop that follows checks each "i" row against the other "j" rows
+    for(j in 1:nrow(indspecies)){
+      if(j == i){
+        NULL # skip if i is equal to j (don't campare it to itself)
+      }else{
+        doesmatch <- match(indspecies[j,], tomatch)  # check if anything in i equals j
+        doesmatch2 <- match(tomatch, indspecies[j,]) # check if anything in j equals i
+        x <- sum(doesmatch, doesmatch2)              # add them up
+        if(!is.na(x)){
+          revrows[i] <- j # if reactants and products are exactly the same, "x" will be numeric;
+                          # if even one reactant/product are different, an NA will be generated and sum(x) will be NA;
+                          # write this reaction to the storage vector if it's numeric (if it's a reversable reaction)
+        }
+      }
+    }
+  }
+  
+  if(length(revrows) == 0){
+    revrxnslst <- NULL # if no reversable reactions were detected, there is no list to populate
+  }else{
+    
+    # the for loop that follows just checks for any NAs that slipped in during the process and removes this row
+    for(i in 1:length(revrows)){
+      if(!is.na(revrows[i]) & is.na(revrows[revrows[i]]))
+        revrows[i] <- NA 
+    }
+    
+    
+    revrxnslst <- data.frame(rxn1 = numeric(0),
+                             rxn2 = numeric(0)) # store the list of reactions that got combined as one reversable reaction
+    
+    # the for loop that follows populates the list of pair of reactions that got concatenated into one reversable reaction
+    for(i in 1:length(revrows)){
+      if(!is.na(revrows[i])){
+        x <- data.frame(rxn1 = i, rxn2 = revrows[i]) # if it's not NA, write reaction 1 and 2 into x object
+        revrxnslst <- rbind(revrxnslst, x)           # add this row to the previously created blank data frame
+      }
+    }
+    
+    revrxnslst$Combo <- "BLANK"   # Create a column of their combination
+    
+    # the for loop that follows populates the previously created blank column
+    for(i in 1:nrow(revrxnslst)){
+      rxn1 <- revrxnslst$rxn1[i] # temporarily store reaction 1
+      rxn2 <- revrxnslst$rxn2[i] # temproarily store reaction 2
+      rxns <- c(rxn1, rxn2)[order(c(rxn1, rxn2))]        # combine them by order of reaction 1 then 2
+      revrxnslst$Combo[i] <- paste(rxns, collapse = " ") # concatenate the two reactions together into the blank variable
+    }
+    
+    revrxnslst <- revrxnslst[duplicated(revrxnslst$Combo),] # remove duplicated rows
+    revrxnslstmsg <- revrxnslst                             # duplicate this object to be used later
+    
+    x <- data.frame(matrix(c(rxnmech[revrxnslstmsg$rxn1,], rxnmech[revrxnslstmsg$rxn2,]), 
+                      ncol = 2), stringsAsFactors = FALSE) # convert reactions list to matrix
+    names(x) <- c("Step1", "Step2")               # rename variables
+    revrxnslstmsg <- cbind(revrxnslstmsg, x)[,-3] # bind this to the previously stored data frame
+  
+    # the for loop that follows checks to see if an equilibrium sign is already present for each row; if so, it's ignored;
+    #  if not, it replaces the = sign with the <=> sign
+    for(i in revrxnslst$rxn2){
+      if(length(grep("<=>", rxnmech[i,])) == 1){
+        NULL # ignore
+      }else{
+        rxnmech[i,] <- gsub("=", "<=>", rxnmech[i,]) # replace = with <=>
+      }
+    }
+    
+    rxnmech <- as.data.frame(rxnmech[-revrxnslst$rxn1,], stringsAsFactors = FALSE) # finally, rewrite rxnmech to be used later
+    names(rxnmech)[1] <- "Steps" # rename variable
+  }
+  
+  rxnmech # print the object to be returned in the message
+  
+  # define the message that is output by the function
+  if(is.null(revrxnslst)){
+    message <- "Did not detect any reversible reactions written at two irreversible reactions."
+  }else{
+    message <- list(
+      paste("Detected", nrow(revrxnslst), "reversible reactions listed as two irreversable reactions:"),
+      revrxnslstmsg,
+      "Final reaction mechanism:",
+      rxnmech)
+  }
+  message # print the message
+})
+
+revrxnrem <- reactive({
+  # everthing here is duplicated from the previous "revrxnmessage" function; comments above with the exception that
+  # the only object that is printed is the newly created data fram itself, not the message
+  
+  rxnmech <- input$rxn
+
+  rxnmech <- data.frame(Steps = unlist(strsplit(rxnmech, "\n")[[1]]), 
+                        stringsAsFactors = FALSE)
+  
+  indreactall <- matrix(rep("BLANK", 10*nrow(rxnmech)), nrow = nrow(rxnmech))
+  indprodall <- matrix(rep("BLANK", 10*nrow(rxnmech)), nrow = nrow(rxnmech))
+  for(j in 1:nrow(rxnmech)){
+    reactprod <- data.frame(matrix(strsplit(rxnmech[j,], "<=> | =")[[1]], ncol = 2), 
+                          stringsAsFactors = FALSE)
+    names(reactprod) <- c("Reactants", "Products")
+    
+    indreact <- matrix(gsub(" ", "", strsplit(reactprod$Reactants[1], " \\+ ")[[1]]), nrow = 1)
+    indreact <- cbind(indreact, matrix(rep("BLANK", 10 - ncol(indreact)), nrow = 1))
+    indreactall[j,] <- indreact[1,]
+    
+    indprod <- matrix(gsub(" ", "", strsplit(reactprod$Products[1], " \\+ ")[[1]]), nrow = 1)
+    indprod <- cbind(indprod, matrix(rep("BLANK", 10 - ncol(indprod)), nrow = 1))
+    indprodall[j,] <- indprod[1,]
+  }
+  
+  indspecies <- matrix(rep("BLANK", 10*nrow(indprodall)), ncol = 10)
+  for(i in 1:nrow(indprodall)){
+    react <- indreactall[i,][indreactall[i,] != "BLANK"]
+    prod <- indprodall[i,][indprodall[i,] != "BLANK"]
+    species <- c(react, prod)
+    indspecies[i, 1:length(species)] <- species
+  }
+  
+  revrows <- numeric(0)
+  for(i in 1:nrow(indspecies)){
+    tomatch <- indspecies[i,]
+    for(j in 1:nrow(indspecies)){
+      if(j == i){
+        NULL
+      }else{
+        doesmatch <- match(indspecies[j,], tomatch)
+        doesmatch2 <- match(tomatch, indspecies[j,])
+        x <- sum(doesmatch, doesmatch2)
+        if(!is.na(x)){
+          revrows[i] <- j
+        }
+      }
+    }
+  }
+  
+  if(length(revrows) == 0){
+    NULL
+  }else{
+    for(i in 1:length(revrows)){
+      if(!is.na(revrows[i]) & is.na(revrows[revrows[i]]))
+        revrows[i] <- NA 
+    }
+    
+    revrxnslst <- data.frame(rxn1 = numeric(0),
+                             rxn2 = numeric(0))
+    for(i in 1:length(revrows)){
+      if(!is.na(revrows[i])){
+        x <- data.frame(rxn1 = i, rxn2 = revrows[i])
+      revrxnslst <- rbind(revrxnslst, x)
+      }
+    }
+    
+    revrxnslst$Combo <- "BLANK"
+    for(i in 1:nrow(revrxnslst)){
+      rxn1 <- revrxnslst$rxn1[i]
+      rxn2 <- revrxnslst$rxn2[i]
+      rxns <- c(rxn1, rxn2)[order(c(rxn1, rxn2))]
+      revrxnslst$Combo[i] <- paste(rxns, collapse = " ")
+    }
+    
+    revrxnslst <- revrxnslst[duplicated(revrxnslst$Combo),]
+  
+    for(i in revrxnslst$rxn2){
+      if(length(grep("<=>", rxnmech[i,])) == 1){
+        NULL
+      }else{
+        rxnmech[i,] <- gsub("=", "<=>", rxnmech[i,])
+      }
+    }
+    
+    rxnmech <- as.data.frame(rxnmech[-revrxnslst$rxn1,], 
+                             stringsAsFactors = FALSE)
+  }
+  rxnmech
+})
+
+rxnmat <- reactive({
+  rxnmech <- revrxnrem() # run the previous function reactively to take care of reversable reactions
+  
+  allsteps <- data.frame(Substance = character(),
+                         Coef = numeric(), 
+                         Step = numeric(), 
+                         stringsAsFactors = FALSE) # store substance, coefficient, and step
+  
+  # the for loop that follows will go row by row and extract the stoichiometric matrix
+  for(j in 1:nrow(rxnmech)){ # for every individual "j" row...
+    reactprod <- data.frame(matrix(strsplit(rxnmech[j,], "<=> | =")[[1]], ncol = 2), 
+                          stringsAsFactors = FALSE) # store "jth" row and split into reactants and products
+    names(reactprod) <- c("Reactants", "Products")  # rename variables
+    
+    indreact <- data.frame(matrix(gsub(" ", "", strsplit(reactprod$Reactants[1], " \\+ ")[[1]]), nrow = 1), 
+                           stringsAsFactors = FALSE) # split reactants into individual cells
+    indprod <- data.frame(matrix(gsub(" ", "", strsplit(reactprod$Products[1], " \\+ ")[[1]]), nrow = 1), 
+                          stringsAsFactors = FALSE)  # split products into individual cells
+    
+    subname <- character()  # store the substance name
+    reactcoefs <- numeric() # store the substance's (reactants) coefficient
+    
+    # the for loop that follows will, for every "i" species in the reactants, write the substance and coefficient;
+    # based on three possibilities: (1) If there is no coeffient (i.e. "H2"); (2) If there is a single digit
+    # coefficient (i.e. 2H2); (3) If there is a double digit coefficient (i.e. 12H2). each one pulls the correct
+    # species coefficent
+    for(i in 1:ncol(indreact)){
+      if(is.na(as.numeric(substr(indreact[,i], 1, 1)))){
+        subname[i] <- as.character(indreact[1,i])
+        reactcoefs[i] <- 1
+      }else if(!is.na(as.numeric(substr(indreact[,i], 1, 2))) & substr(indreact[,i], 2, 2) !="E"){
+        subname[i] <- as.character(substr(indreact[1,i], 2, nchar(indreact[2,i])))
+        reactcoefs[i] <- as.numeric(substr(indreact[,i], 1, 2))
+      }else{
+        subname[i] <- as.character(substr(indreact[1,i], 2, nchar(indreact[1,i])))
+        reactcoefs[i] <- as.numeric(substr(indreact[,i], 1, 1))
+      }
+    }
+    reactcoefs <- data.frame(Substance = subname, 
+                            Coef = reactcoefs*-1, Step = j,
+                            stringsAsFactors = FALSE) # populate the data frame
+    
+    # the if loop that follows checks if any substnaces are duplicated (i.e. H + H should be 2H)
+    if(sum(duplicated(reactcoefs$Substance)) > 0){
+      dupsub <- reactcoefs$Substance[duplicated(reactcoefs$Substance)]  # find the duplicated substance
+      newcoef <- sum(reactcoefs$Coef[reactcoefs$Substance == dupsub])   # define the new coefficient
+      reactcoefs <- reactcoefs[-1*match(dupsub, reactcoefs$Substance),] # get rid of the duplicated versions
+      reactcoefs$Coef[reactcoefs$Substance == dupsub] <- newcoef        # write over existing data
+    }
+    
+    # this next section is a repeat of the previous section except for products, not reactants
+    subname <- character()
+    prodcoefs <- numeric()
+    for(i in 1:ncol(indprod)){
+      if(is.na(as.numeric(substr(indprod[,i], 1, 1)))){
+        subname[i] <- as.character(indprod[1,i])
+        prodcoefs[i] <- 1
+      }else if(!is.na(as.numeric(substr(indprod[,i], 1, 2))) & substr(indprod[,i], 2, 2) !="E"){
+        subname[i] <- as.character(substr(indprod[1,i], 2, nchar(indprod[2,i])))
+        prodcoefs[i] <- as.numeric(substr(indprod[,i], 1, 2))
+      }else{
+        subname[i] <- as.character(substr(indprod[1,i], 2, nchar(indprod[1,i])))
+        prodcoefs[i] <- as.numeric(substr(indprod[,i], 1, 1))
+      }
+    }
+    prodcoefs <- data.frame(Substance = subname, 
+                            Coef = prodcoefs, Step = j,
+                             stringsAsFactors = FALSE)
+    if(sum(duplicated(prodcoefs$Substance)) > 0){
+      dupsub <- prodcoefs$Substance[duplicated(prodcoefs$Substance)]
+      newcoef <- sum(prodcoefs$Coef[prodcoefs$Substance == dupsub])
+      prodcoefs <- prodcoefs[-1*match(dupsub, prodcoefs$Substance),]
+      prodcoefs$Coef[prodcoefs$Substance == dupsub] <- newcoef
+    }
+    
+    allsteps <- rbind(allsteps, reactcoefs, prodcoefs) # combine reactants and coefficents into data frame
+  }
+  
+  substances <- unique(allsteps$Substance) # get the unique substances
+  nosubstances <<- length(substances)      # store the number of unique substances
+  rxnmat <- data.frame(matrix(rep(0, length(substances) * length(rxnmech)), 
+                              nrow = length(rxnmech)), stringsAsFactors = FALSE) # store blank data frame
+  names(rxnmat) <- substances              # rename variables
+  
+  # the for loop that follows actually populates the final reaction matrix
+  for(i in 1:nrow(rxnmech)){
+    temp <- allsteps[allsteps$Step == i, ]    # store the ith row
+    x <- match(temp$Substance, names(rxnmat)) # find the substance in the data
+    if(sum(duplicated(x)) > 0){
+      dupsub <- data.frame(table(temp$Substance)) # find the duplicated substance, if present
+      dupsub <- as.character(dupsub$Var1[dupsub$Freq > 1]) # find the duplicated substance, if present
+      temp$Coef[temp$Substance == dupsub] <- sum(temp$Coef[temp$Substance == dupsub]) # recaculuate the coefficient
+      temp <- temp[!duplicated(x),]               # get rid of the duplicated substances
+      x <- x[!duplicated(x)]                      # get rid of the duplicated substances of the x object
+    }
+    rxnmat[i,x] <- temp$Coef # write to the reaction matrix
+  }
+  
+  rxnmat[is.na(rxnmat)] <- 0 # replace NAs with 0s
+  
+  # the following section is commented out; it removes H2O from the mechanism
+  # if(sum(substances %in% "H2O") > 0){
+  #   rxnmat <- rxnmat[, -match("H2O", names(rxnmat))]
+  #   nosubstances <<- nosubstances - 1
+  # }
+  
+  diag <- data.frame(diag(nrow(rxnmat)))   # create a diagonal matrix equal size to the reaction mechanism
+  
+  rxnmat <- as.matrix(cbind(rxnmat, diag)) # add the reaction matrix
+  rxnmat
+})
+
+# print the message
+renderPrint({
+  revrxnmessage()
+})
+
+# print the reaction matrix as a table
+renderTable({
+  rxnmat()
+}, digits = 1)
+```
+
+We now perform row reduction on the above stoichiometry matrix:
+
+```{r rowred1, warning=FALSE, include=TRUE}
+rowred1 <- reactive({
+  rxnmat <- rxnmat()                  # run the function again to run in the data
+  rowred1 <- data.frame(rref(rxnmat)) # run the row reduction and format to data frame
+  # fancy way to get the number of steps
+  nosteps <- sum(substr(names(rowred1), 1, 1) == "X" & !is.na(as.numeric(substr(names(rowred1), 2, 2))))
+  nosubstances <- ncol(rowred1) - nosteps # fancy way to get the number of substances
+  loopcheck <- rowSums(rowred1[, 1:nosubstances] != 0) # checks if each row is a loop
+  # names the loops
+  
+  # here, and throughout the rest of the code, there are if checks at the beginning to detects if 
+  # there were no loops (legal or illegal) in the mechanism in the first place. If there are no loops,
+  # then the code simply puts out a message saying that no further code was run because there aren't
+  # any loops in the mechanism.
+  if(length(c(rep(NA, nrow(rowred1) - sum(loopcheck == 0)), 
+                   paste0("L", 1:sum(loopcheck == 0)))) !=
+     nrow(rowred1)){
+    rowred1 <- data.frame(Message = "No loops detected in mechanism; all further code will not be run.")
+  }else{
+    rowred1$Loop <- c(rep(NA, nrow(rowred1) - sum(loopcheck == 0)), 
+                   paste0("L", 1:sum(loopcheck == 0)))
+            }
+  
+  rowred1 # print the data frame for the function's use
+})
+
+# print the first row reduction as a table
+renderTable({
+  rowred1()
+}, digits = 1)
+```
+
+From this analysis, we can identify reaction loops. We will now only keep the data that has loops and remove all reversible reactions from the next step, resulting in the second matrix prior to row reduction:
+
+```{r rxnmat2, warning=FALSE, include=TRUE}
+rowred1.noR <- reactive({
+  rowred1 <- rowred1() # call in the data after the first row reduction
+  # fancy way to get the number of steps
+
+  if(nrow(rowred1) == 1){
+    rowred1.noR <- data.frame(Message = "No loops detected in mechanism; all further code will not be run.")
+  }else{
+    nosteps <- sum(substr(names(rowred1), 1, 1) == "X" & !is.na(as.numeric(substr(names(rowred1), 2, 2))))
+  nosubstances <- (ncol(rowred1) - 1) - nosteps # fancy way to get the number of steps
+  loopcheck <- rowSums(rowred1[, 1:nosubstances] != 0)      # check if loops exist
+  rowred1.loop <- rowred1[loopcheck == 0, -1:-nosubstances] # reduce the data set to only contain 
+                                                            # loops (used later)
+  loopnames <- rowred1.loop$Loop # store loop names
+  
+  rxnmech <- revrxnrem() # call in the original reaction matrix again
+  
+  reversablerxns <- numeric() # store the reversible reactions
+  
+  # the for loop that follows will identify if a reaction is reversible or not
+  for(i in 1:nosteps){
+    isrev <- length(grep("<=>", rxnmech[i,])) # find if the reaction has a "<=>"
+    reversablerxns[i] <- isrev                # store it
+  }
+  
+  reversablerxns <- as.logical(reversablerxns)   # convert these to logical 
+  rowred1.noR <- rowred1.loop[, !reversablerxns] # remove the reversible reactions
+  rowred1.noR <- rowred1.noR[, !names(rowred1.noR) %in% "Loop"] # remove the "Loop" column
+
+  diag <- data.frame(diag(nrow(rowred1.noR)))        # create the new diagonal
+  names(diag) <- paste0("L", 1:ncol(diag))           # rename the diagonals
+  rowred1.noR <- as.matrix(cbind(rowred1.noR, diag)) # bind the data frames together
+  }
+  rowred1.noR # print the data for the function
+})
+
+rowred1.loop <- reactive({
+  # the following sections are repeated from above until the added for loop
+  rowred1 <- rowred1() 
+  
+  if(nrow(rowred1) == 1){
+    loopmessage <- "No loops detected in mechanism; all further code will not be run."
+  }else{
+    nosteps <- sum(substr(names(rowred1), 1, 1) == "X" & !is.na(as.numeric(substr(names(rowred1), 2, 2))))
+  nosubstances <- (ncol(rowred1) - 1) - nosteps
+  loopcheck <- rowSums(rowred1[, 1:nosubstances] != 0)
+  rowred1.loop <- rowred1[loopcheck == 0, -1:-nosubstances]
+  
+  rxnmech <- revrxnrem()
+  
+  reversablerxns <- numeric()
+  for(i in 1:nosteps){
+    isrev <- length(grep("<=>", rxnmech[i,]))
+    reversablerxns[i] <- isrev
+  }
+  
+  reversablerxns <- as.logical(reversablerxns)
+  rowred1.noR <- rowred1.loop[, c(!reversablerxns, TRUE)]
+  loopnames <- rowred1.noR$Loop
+  rowred1.noR <- rowred1.noR[, !names(rowred1.noR) %in% "Loop"]
+
+  ill.loops <- numeric(0) # store the text of the illegal loops
+  
+  # the for loop that follows identifies if the loop is illegal or not
+  for(i in 1:nrow(rowred1.noR)){
+    ill.loop <- as.vector(rowred1.noR[i, rowred1.noR[i,] != 0]) # temporarily store the ith row as logical
+    if(length(ill.loop) == 0){
+      ill.loop = 0 # if all values equal 0, it's not an illegal loop
+    }else{
+      ill.loop <- as.vector(ill.loop > 0) # convert TRUE/FALSE to 1/0
+    if(sum(ill.loop) == length(ill.loop) | sum(ill.loop) == 0){
+      ill.loop = 1 # if the sume of these loops is equal to the length or if the sum is 0, that's illegal
+    }else{
+      ill.loop = 0 # otherwise, it's not
+      }
+    }
+    ill.loops[i] <- ill.loop # store the value
+  }
+    
+  if(sum(ill.loops) == 0){
+    loopmessage <<- "There are no illegal loops after the first row reduction" # message
+  }else{
+    # the previous section only identified loops, but didn't grab the exact text; this section does this
+    loopnms <- loopnames[as.logical(ill.loops)] # store the loop names
+    
+    nms <- list(0) # store the substance names
+    
+    # the for loop that follows pulls the names and coefficients of the individual reactions
+    for(i in 1:length(loopnms)){
+      looprowcheck <- rowred1$Loop == loopnms[i] # check if a substance is in the loop
+      looprowcheck[is.na(looprowcheck)] <- FALSE # swap FALSE with NA
+      onerow <- rowred1[looprowcheck,]           # keep only the one row
+      onerownames <- names(onerow[,onerow != 0]) # store names of the substances
+      onerownames <- onerownames[!onerownames %in% "Loop"] # remove "Loop"
+      # round to nearest 0.5
+      newonerownames <- round(rowred1[looprowcheck, names(rowred1) %in% onerownames]/.5)*.5
+      # paste the names together
+      nms[[i]] <- paste(paste(newonerownames, names(newonerownames), sep = ""), collapse = " + ")
+    }
+    
+    x <- list(0) # store the results of the total string
+    
+    # the for loop that follows pastes the final list together for the message
+    for(i in 1:length(loopnms)){
+      x[[i]] <- paste(loopnms[i], ":", paste(unlist(nms[[i]]), collapse = " "))
+    }
+    
+    # compose the final message
+    loopmessage <<- paste("There are", length(ill.loops[ill.loops == 1]), 
+                          "illegal reaction loops, one of which is", x)
+    }
+  }
+  loopmessage
+})
+
+# print the message
+renderPrint({
+  rowred1.loop()
+})
+
+# print the row reduction without reversible reactions
+renderTable({
+  rowred1.noR()
+}, digits = 1)
+
+```
+
+We now perform row reduction again on the modified data, results printed below. Additionally, you can download data sets for 1) the first row reduction, 2) the second row reduction, and 3) the second row reduction after it has been transposed and a row of -1's added to if for direct insertion in to Mathematica Linear Programming algorithm.
+
+```{r rowred2, warning=FALSE, include=TRUE}
+# this function performs the 2nd row reduction and prints the results
+rowred2 <- reactive({
+  rowred1.noR <- rowred1.noR() # call in the data from previous function
+  
+  if(nrow(rowred1.noR) == 1){
+    rowred2 <- data.frame(Message = "No loops detected in mechanism; all further code will not be run.")
+  }else{
+    rowred2 <- data.frame(rref(as.matrix(rowred1.noR))) # run the 2nd row reduction and convert to dataframe
+    rowred2$Loop <- paste0("L", 1:nrow(rowred2), "'")   # rename the loops
+    
+    rowred2.rmrev <- rowred2
+    rowred2.rmrev$Check <- 0
+    norows <- sum(grepl("X", names(rowred2)))
+    for(i in 1:nrow(rowred2.rmrev)){
+      check <- sum(rowred2.rmrev[i, grepl("X", names(rowred2.rmrev))] == 0)
+      if(check == norows){
+        rowred2.rmrev$Check[i] <- 1
+      }
+  }
+    rowred2 <- rowred2.rmrev[rowred2.rmrev$Check != 1,]
+    rowred2 <- rowred2[!names(rowred2) %in% "Check"]
+    
+  }
+  rowred2 # print to the function
+})
+
+# this function performs the 2nd row reducation and prints the message of illegal loops
+red2ill <- reactive({
+  rowred1.noR <- rowred1.noR() # call in the data from previous function
+  
+  if(nrow(rowred1.noR) == 1){
+    message <- "No loops detected in mechanism; all further code will not be run."
+  }else{
+    rowred2 <- data.frame(rref(as.matrix(rowred1.noR))) # run the 2nd row reduction and convert to dataframe
+  loopnms <- paste0("L", 1:nrow(rowred2), "'")        # rename the loops
+  redtemp <- rowred2[, substr(names(rowred2), 1, 1) != "L"] # keep the loops only
+  
+  zerocheck <- logical(0) # store the rows that add to 0
+  
+  # the for loop that follows tracks if the row adds to 0 or not
+  for(i in 1:nrow(redtemp)){
+    if(sum(redtemp[i, ] == 0) == ncol(redtemp)){
+      zerocheck[i] <- TRUE
+    }else{
+      zerocheck[i] <- FALSE
+    }
+  }
+  
+  redtemp <- redtemp[!zerocheck, ] # eliminate the rows that add to 0
+  
+  illchecks <- logical(0) # store the illegal reactions
+  
+  # the for loop that follows will determine if the reaction step is illegal or not
+  for(i in 1:nrow(redtemp)){
+    illcheck <- sum(redtemp[i, ] < 0)
+    if(illcheck > 0){
+      illegal <- FALSE
+    }else{
+      illegal <- TRUE
+    }
+    illchecks[i] <- illegal
+  }
+  
+  redtemp$Illegal <- illchecks # write illegal loops to the data frame
+  
+  if(sum(redtemp$Illegal) == 0){
+    message <- "There are no illegal loops after second row reduction." # message
+  }else{
+    
+    # this section is similar to the prevoius section in defining a message to be printed
+    rowred1 <- rowred1()
+    rowred2$Loop <- paste0("L", 1:nrow(rowred2), "'")
+    rowred2p <- rowred2[rownames(redtemp[redtemp$Illegal == TRUE,]), substr(names(rowred2), 1, 1) == "L"]
+    
+    tnmst <- list(0)
+    for(i in 1:nrow(rowred2p)){
+      lnms <- names(rowred2p[i, rowred2p[i,] != 0])
+      lnms <- lnms[lnms != "Loop"]
+      coefs <- rowred2p[i, names(rowred2p) %in% lnms]
+      lnms2 <- paste(round(coefs), lnms, sep="")
+      lnms2 <- gsub("-1", "-", lnms2)
+      lnms2 <- gsub("1L", "L", lnms2)
+      lnms2 <- paste(lnms2, collapse = " + ")
+      lnms2 <- paste(rowred2p$Loop[i], "=", lnms2)
+      
+      nms <- list(0)
+      for(j in 1:length(lnms)){
+        looprowcheck <- rowred1$Loop == lnms[j]
+        looprowcheck[is.na(looprowcheck)] <- FALSE
+        onerow <- rowred1[looprowcheck,]
+        onerownames <- names(onerow[,onerow != 0])
+        onerownames <- onerownames[!onerownames %in% "Loop"]
+        newonerownames <- round(rowred1[looprowcheck, names(rowred1) %in% onerownames]/.5)*.5
+        
+        if(j == 1){
+          nms[[j]] <- paste0(round(coefs[j]/.5)*.5, "(", 
+                             paste(paste(newonerownames, names(newonerownames), 
+                                         sep = ""), collapse = " + "), ")")
+        }else{
+          nms[[j]] <- paste0(round(coefs[,j]/.5)*.5, "(", 
+                             paste(paste(newonerownames, names(newonerownames), 
+                                         sep = ""), collapse = " + "), ")")
+        }
+      }
+      
+      tmns <- paste(nms, collapse = " + ")
+      tmns <- gsub("1\\(", "\\(", tmns)
+      tmns <- gsub("1X", "X", tmns)
+      tmns <- gsub("\\+ \\-", "\\- ", tmns)
+      
+      tnmst[[i]] <- paste(lnms2, "=", tmns)
+    }
+
+    message <- paste("There are", length(tnmst), "illegal loops:", tnmst) # print message
+    }
+  }
+  
+  message
+})
+
+# this function performs and prints the second row reduction and is very similar to the first,
+# but then transforms the data as it ready to be input into Mathematica for the linear programming
+# sequence.
+rowred2ti <- reactive({
+  rowred1.noR <- rowred1.noR()
+  
+  if(nrow(rowred1.noR) == 1){
+    rowred2.t1 <- data.frame(Message = "No loops detected in mechanism; all further code will not be run.")
+  }else{
+    rowred2 <- data.frame(rref(rowred1.noR))
+    
+    rowred2.rmrev <- rowred2
+    rowred2.rmrev$Check <- 0
+    norows <- sum(grepl("X", names(rowred2)))
+    for(i in 1:nrow(rowred2.rmrev)){
+      check <- sum(rowred2.rmrev[i, grepl("X", names(rowred2.rmrev))] == 0)
+      if(check == norows){
+        rowred2.rmrev$Check[i] <- 1
+      }
+  }
+    rowred2 <- rowred2.rmrev[rowred2.rmrev$Check != 1,]
+    rowred2 <- rowred2[!names(rowred2) %in% "Check"]
+
+    Lcols <- substr(names(rowred2), 1, 1)
+    rowred2.noL <- rowred2[, Lcols == "X"]
+    rowred2.t <- data.frame(t(rowred2.noL))
+    rowred2.t1 <- rbind(rowred2.t, rep(-1, ncol(rowred2.t)))
+  }
+
+  rowred2.t1
+})
+
+# print the second row reduction
+renderTable({
+  rowred2()
+}, digits = 1)
+
+# print the message
+renderPrint({
+  red2ill()
+})
+
+# print the second row reduction
+renderTable({
+  rowred2ti()
+}, digits = 1)
+
+# Shiny code to program functionality and downloads
+ui <- fluidPage(downloadButton("drowred1", "Download 1st Row Reduction"),
+                downloadButton("drowred2", "Download 2nd Row Reduction"),
+                downloadButton("drowred3", "Download Data for Linear Programming in Mathematica"))
+
+server <- function(input, output) {
+  output$drowred1 <- downloadHandler(
+    filename = function() {
+      paste("1strowred", ".csv", sep="")
+    },
+    content = function(file) {
+      write.csv(rowred1(), file, row.names = FALSE)
+    }
+  )
+  
+  output$drowred2 <- downloadHandler(
+    filename = function() {
+      paste("2ndrowred", ".csv", sep="")
+    },
+    content = function(file) {
+      write.csv(rowred2(), file, row.names = FALSE)
+    }
+  )
+  
+  output$drowred3 <- downloadHandler(
+    filename = function() {
+      paste("2ndrowredtrans", ".csv", sep="")
+    },
+    content = function(file) {
+      write.csv(rowred2ti(), file, row.names = FALSE)
+    }
+  )
+}
+
+shinyApp(ui, server)
+
+```
+
+In addition to checking for illegal loops, we also need to verify that all loops containing only reversible reactions are compliant with Wegscheider’s condition. If there are no reversible reactions in the mechanism, the following sections will generate errors. First, we produce a stoichiometry matrix that includes only the reversible reactions:
+
+```{r Weg, warning=FALSE, include=TRUE}
+stoichmatreversable <- reactive({
+stoichmatrev <- rxnmat()
+
+rowred1 <- rowred1() 
+nosteps <- sum(substr(names(rowred1), 1, 1) == "X" & !is.na(as.numeric(substr(names(rowred1), 2, 2))))
+
+rxnmech <- revrxnrem() # call in the original reaction matrix again
+reversablerxns <- numeric() # store the reversible reactions
+
+# the for loop that follows will identify if a reaction is reversible or not
+for(i in 1:nosteps){
+  isrev <- length(grep("<=>", rxnmech[i,])) # find if the reaction has a "<=>"
+  reversablerxns[i] <- isrev                # store it
+}
+
+reversablerxns <- as.logical(reversablerxns)   # convert these to logical 
+
+stoichmatrev <- stoichmatrev[reversablerxns,]
+stoichmatrev
+})
+
+
+renderTable({
+  stoichmatreversable()
+}, digits = 1)
+
+```
+
+Next, we'll perform row reduction to identify any loops within the reversible reactions so that we can manually verify that 
+Wegscheider’s condition is met.
+
+```{r WegLoop, warning=FALSE, include=TRUE}
+rowred1.rev <- reactive({
+  rxnmat <- stoichmatreversable()                  # run the function again to run in the data
+  rowred1 <- data.frame(rref(rxnmat)) # run the row reduction and format to data frame
+  # fancy way to get the number of steps
+  nosteps <- sum(substr(names(rowred1), 1, 1) == "X" & !is.na(as.numeric(substr(names(rowred1), 2, 2))))
+  nosubstances <- ncol(rowred1) - nosteps # fancy way to get the number of substances
+  loopcheck <- rowSums(rowred1[, 1:nosubstances] != 0) # checks if each row is a loop
+  # names the loops
+  
+  # here, and throughout the rest of the code, there are if checks at the beginning to detects if 
+  # there were no loops (legal or illegal) in the mechanism in the first place. If there are no loops,
+  # then the code simply puts out a message saying that no further code was run because there aren't
+  # any loops in the mechanism.
+  if(length(c(rep(NA, nrow(rowred1) - sum(loopcheck == 0)), 
+                   paste0("L", 1:sum(loopcheck == 0)))) !=
+     nrow(rowred1)){
+    rowred1 <- data.frame(Message = "No loops detected in mechanism; all further code will not be run.")
+  }else{
+    rowred1$Loop <- c(rep(NA, nrow(rowred1) - sum(loopcheck == 0)), 
+                   paste0("L", 1:sum(loopcheck == 0)))
+            }
+  
+  rowred1 # print the data frame for the function's use
+})
+
+rowred1.loop.rev <- reactive({
+  # the following sections are repeated from above until the added for loop
+  rowred1 <- rowred1.rev() 
+  
+  if(nrow(rowred1) == 1){
+    loopmessage <- "No loops detected in mechanism; all further code will not be run."
+  }else{
+    nosteps <- sum(substr(names(rowred1), 1, 1) == "X" & !is.na(as.numeric(substr(names(rowred1), 2, 2))))
+  nosubstances <- (ncol(rowred1) - 1) - nosteps
+  loopcheck <- rowSums(rowred1[, 1:nosubstances] != 0)
+  rowred1.loop <- rowred1[loopcheck == 0, -1:-nosubstances]
+  
+  rxnmech <- revrxnrem()
+  
+  reversablerxns <- numeric()
+  for(i in 1:nosteps){
+    isrev <- length(grep("<=>", rxnmech[i,]))
+    reversablerxns[i] <- isrev
+  }
+  
+  reversablerxns <- as.logical(reversablerxns)
+  rowred1.R <- rowred1.loop[, c(reversablerxns, TRUE)]
+  loopnames <- rowred1.R$Loop
+  rowred1.R <- rowred1.R[, !names(rowred1.R) %in% "Loop"]
+
+  ill.loops <- numeric(0) # store the text of the illegal loops
+  
+  # the for loop that follows identifies if the loop is illegal or not
+  for(i in 1:nrow(rowred1.R)){
+    ill.loop <- as.vector(rowred1.R[i, rowred1.R[i,] != 0]) # temporarily store the ith row as logical
+    if(length(ill.loop) == 0){
+      ill.loop = 0 # if all values equal 0, it's not an illegal loop
+    }else{
+      ill.loop <- as.vector(ill.loop > 0) # convert TRUE/FALSE to 1/0
+    if(sum(ill.loop) == length(ill.loop) | sum(ill.loop) == 0){
+      ill.loop = 1 # if the sume of these loops is equal to the length or if the sum is 0, that's illegal
+    }else{
+      ill.loop = 0 # otherwise, it's not
+      }
+    }
+    ill.loops[i] <- ill.loop # store the value
+  }
+
+  # the previous section only identified loops, but didn't grab the exact text; this section does this
+  loopnms <- loopnames # store the loop names
+  
+  nms <- list(0) # store the substance names
+  
+  # the for loop that follows pulls the names and coefficients of the individual reactions
+  for(i in 1:length(loopnms)){
+    looprowcheck <- rowred1$Loop == loopnms[i] # check if a substance is in the loop
+    looprowcheck[is.na(looprowcheck)] <- FALSE # swap FALSE with NA
+    onerow <- rowred1[looprowcheck,]           # keep only the one row
+    onerownames <- names(onerow[,onerow != 0]) # store names of the substances
+    onerownames <- onerownames[!onerownames %in% "Loop"] # remove "Loop"
+    # round to nearest 0.5
+    newonerownames <- round(rowred1[looprowcheck, names(rowred1) %in% onerownames]/.5)*.5
+    # paste the names together
+    nms[[i]] <- paste(paste(newonerownames, names(newonerownames), sep = ""), collapse = " + ")
+  }
+  
+  x <- list(0) # store the results of the total string
+  
+  # the for loop that follows pastes the final list together for the message
+  for(i in 1:length(loopnms)){
+    x[[i]] <- paste(loopnms[i], ":", paste(unlist(nms[[i]]), collapse = " "))
+  }
+  
+  # compose the final message
+  loopmessage <<- paste("There are", length(ill.loops), 
+                        "reversible reaction loops that need to be verified of Wegscheider's condition, one of which is", x)
+  }
+  
+  loopmessage
+})
+
+renderPrint({
+  rowred1.loop.rev()
+})
+
+renderTable({
+  rowred1.rev()
+}, digits = 1)
+
+```
