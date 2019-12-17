@@ -32,7 +32,7 @@ IO4- + S2O3I- + 2H2O = 2SO42- + I- + HOI + 3H+<br />
 S2O32- + HOI = S2O3OH- + I-<br />
 S2O3OH- + S2O3I- = S4O62- + HOI<br />
 HSO3- + I2 + H2O = SO42- + 2I- + 3H+<br />
-HSO3- + HOI = SO42- + I- + 2H+<br />
+HSO3- + HOI = SO42- + I- + 2H+<br />=
 IO4- + HSO3- = SO42- + IO3- + H+<br />
 S2O32- + HIO2 + H+ = S2O3OH- + HOI<br />
 2S2O3OH- + H2O = S2O32- + 2HSO3- + 2H+<br />
@@ -444,7 +444,7 @@ renderTable({
 }, digits = 1)
 ```
 
-From this analysis, we can identify reaction loops. We will now only keep the data that has loops and remove all reversible reactions from the next step, resulting in the second matrix prior to row reduction:
+From this analysis, we can identify reaction loops. We will now only keep the data that has loops and remove all reversible reactions from the next step, resulting in the secondmatrix prior to row reduction:
 
 ```{r rxnmat2, warning=FALSE, include=TRUE}
 rowred1.noR <- reactive({
@@ -471,10 +471,15 @@ rowred1.noR <- reactive({
     reversablerxns[i] <- isrev                # store it
   }
   
-  reversablerxns <- as.logical(reversablerxns)   # convert these to logical 
+  reversablerxns <- as.logical(reversablerxns)  # convert these to logical 
   rowred1.noR <- rowred1.loop[, !reversablerxns] # remove the reversible reactions
-  rowred1.noR <- rowred1.noR[, !names(rowred1.noR) %in% "Loop"] # remove the "Loop" column
-
+  if(class(rowred1.noR) != "data.frame"){
+    rowred1.noR <- data.frame(rowred1.noR)
+    names(rowred1.noR) <- names(rowred1.loop)[!reversablerxns]
+  }else{
+    rowred1.noR <- rowred1.noR[, !names(rowred1.noR) %in% "Loop"] # remove the "Loop" column
+  }
+  
   diag <- data.frame(diag(nrow(rowred1.noR)))        # create the new diagonal
   names(diag) <- paste0("L", 1:ncol(diag))           # rename the diagonals
   rowred1.noR <- as.matrix(cbind(rowred1.noR, diag)) # bind the data frames together
@@ -505,7 +510,11 @@ rowred1.loop <- reactive({
   reversablerxns <- as.logical(reversablerxns)
   rowred1.noR <- rowred1.loop[, c(!reversablerxns, TRUE)]
   loopnames <- rowred1.noR$Loop
-  rowred1.noR <- rowred1.noR[, !names(rowred1.noR) %in% "Loop"]
+  rowred1.noR <- rowred1.noR[, !names(rowred1.noR) %in% "Loop"] # remove the "Loop" column
+  if(class(rowred1.noR) != "data.frame"){
+    rowred1.noR <- data.frame(rowred1.noR)
+    names(rowred1.noR) <- names(rowred1.loop)[!reversablerxns]
+  }
 
   ill.loops <- numeric(0) # store the text of the illegal loops
   
@@ -576,6 +585,8 @@ renderTable({
 We now perform row reduction again on the modified data, results printed below. Additionally, you can download data sets for 1) the first row reduction, 2) the second row reduction, and 3) the second row reduction after it has been transposed and a row of -1's added to if for direct insertion in to Mathematica Linear Programming algorithm.
 
 ```{r rowred2, warning=FALSE, include=TRUE}
+
+
 # this function performs the 2nd row reduction and prints the results
 rowred2 <- reactive({
   rowred1.noR <- rowred1.noR() # call in the data from previous function
@@ -641,6 +652,8 @@ red2ill <- reactive({
   
   redtemp$Illegal <- illchecks # write illegal loops to the data frame
   
+  # COME BACK HERE FROM SAVE FILE
+  
   if(sum(redtemp$Illegal) == 0){
     message <- "There are no illegal loops after second row reduction." # message
   }else{
@@ -650,6 +663,50 @@ red2ill <- reactive({
     rowred2$Loop <- paste0("L", 1:nrow(rowred2), "'")
     rowred2p <- rowred2[rownames(redtemp[redtemp$Illegal == TRUE,]), substr(names(rowred2), 1, 1) == "L"]
     
+    if(input$simplify == FALSE){
+      ################## OLD #################
+      tnmst <- list(0)
+      for(i in 1:nrow(rowred2p)){
+        lnms <- names(rowred2p[i, rowred2p[i,] != 0])
+        lnms <- lnms[lnms != "Loop"]
+        coefs <- rowred2p[i, names(rowred2p) %in% lnms]
+        lnms2 <- paste(round(coefs), lnms, sep="")
+        lnms2 <- gsub("-1", "-", lnms2)
+        lnms2 <- gsub("1L", "L", lnms2)
+        lnms2 <- paste(lnms2, collapse = " + ")
+        lnms2 <- paste(rowred2p$Loop[i], "=", lnms2)
+        
+        nms <- list(0)
+        for(j in 1:length(lnms)){
+          looprowcheck <- rowred1$Loop == lnms[j]
+          looprowcheck[is.na(looprowcheck)] <- FALSE
+          onerow <- rowred1[looprowcheck,]
+          onerownames <- names(onerow[,onerow != 0])
+          onerownames <- onerownames[!onerownames %in% "Loop"]
+          newonerownames <- round(rowred1[looprowcheck, names(rowred1) %in% onerownames]/.5)*.5
+          
+          
+          
+          if(j == 1){
+            nms[[j]] <- paste0(round(coefs[j]/.5)*.5, "(", 
+                               paste(paste(newonerownames, names(newonerownames), 
+                                           sep = ""), collapse = " + "), ")")
+          }else{
+            nms[[j]] <- paste0(round(coefs[,j]/.5)*.5, "(", 
+                               paste(paste(newonerownames, names(newonerownames), 
+                                           sep = ""), collapse = " + "), ")")
+          }
+        }
+        
+        tmns <- paste(nms, collapse = " + ")
+        tmns <- gsub("1\\(", "\\(", tmns)
+        tmns <- gsub("1X", "X", tmns)
+        tmns <- gsub("\\+ \\-", "\\- ", tmns)
+        
+        tnmst[[i]] <- paste(lnms2, "=", tmns)
+      }
+    }else{
+      ################## NEW #################
     tnmst <- list(0)
     for(i in 1:nrow(rowred2p)){
       lnms <- names(rowred2p[i, rowred2p[i,] != 0])
@@ -669,26 +726,30 @@ red2ill <- reactive({
         onerownames <- names(onerow[,onerow != 0])
         onerownames <- onerownames[!onerownames %in% "Loop"]
         newonerownames <- round(rowred1[looprowcheck, names(rowred1) %in% onerownames]/.5)*.5
-        
-        if(j == 1){
-          nms[[j]] <- paste0(round(coefs[j]/.5)*.5, "(", 
-                             paste(paste(newonerownames, names(newonerownames), 
-                                         sep = ""), collapse = " + "), ")")
-        }else{
-          nms[[j]] <- paste0(round(coefs[,j]/.5)*.5, "(", 
-                             paste(paste(newonerownames, names(newonerownames), 
-                                         sep = ""), collapse = " + "), ")")
-        }
+        nms[[j]] <- newonerownames
       }
       
-      tmns <- paste(nms, collapse = " + ")
+      nms.simp <- data.frame(matrix(rep(0, 500*length(nms)), nrow=length(nms), 
+                                    dimnames = list(paste0("Row",1:length(nms)), paste0("X", 1:500))))
+      for(k in 1:length(nms)){
+        multiplier <- unlist(coefs[k])[[1]]
+        replacerow <- match(names(nms[[k]]), dimnames(nms.simp)[[2]])
+        nms.simp[k, replacerow] <- round(nms[[k]] * multiplier / .5) * .5
+      }
+      
+      
+      nms.simp2 <- colSums(nms.simp)
+      nms.simp3 <- nms.simp2[nms.simp2 != 0]
+      nms <- paste(paste(nms.simp3, names(nms.simp3), sep = ""), collapse = " + ")
+      
+      tmns <- nms
       tmns <- gsub("1\\(", "\\(", tmns)
       tmns <- gsub("1X", "X", tmns)
       tmns <- gsub("\\+ \\-", "\\- ", tmns)
       
       tnmst[[i]] <- paste(lnms2, "=", tmns)
     }
-
+    }
     message <- paste("There are", length(tnmst), "illegal loops:", tnmst) # print message
     }
   }
@@ -732,6 +793,8 @@ rowred2ti <- reactive({
 renderTable({
   rowred2()
 }, digits = 1)
+
+checkboxInput("simplify", "Simplify")
 
 # print the message
 renderPrint({
