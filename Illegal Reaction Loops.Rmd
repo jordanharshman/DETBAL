@@ -1,7 +1,7 @@
 ---
 title: "Reaction Loop Check"
 author: "Jordan Harshman"
-date: "February 4, 2019"
+date: "Janurary 20, 2020"
 runtime: shiny
 output: html_document
 ---
@@ -102,6 +102,26 @@ revrxnmessage <- reactive({
     prod <- indprodall[i,][indprodall[i,] != "BLANK"]    # capture products
     species <- c(react, prod)                            # combine
     indspecies[i, 1:length(species)] <- species          # write to blank storage matrix
+    
+    # Next if and loop is to detect if there should be reversible reactions that have been written as such:
+    #  Reaction 1: A + A = B
+    #  Reaction 2: B = 2A
+    # These should be detected as reversible
+    if(sum(duplicated(indspecies[i,])) >= sum(indspecies[i,] == "BLANK")){ # if there's more than expected duplicated "BLANKS"
+      notblank <- indspecies[i,][indspecies[i,] != "BLANK"]                # species that aren't BLANK
+      coef <- data.frame(table(notblank), stringsAsFactors = FALSE)        # get number of duplicated times
+      newspecies <- paste0(coef$Freq, coef$notblank)                       # build a new species putting coefficient in front
+      
+      # Quick loop to get rid of the extra "1" in front of species
+      for(j in 1:length(newspecies)){
+        if(substr(newspecies[j], 1, 1) == "1"){
+          newspecies[j] <- substr(newspecies[j], 2, nchar(newspecies[j]))
+        }
+      }
+      
+      notblank <- matrix(newspecies, ncol = length(newspecies))            # write new species as matrix
+      indspecies[i,] <- cbind(notblank, matrix(rep("BLANK", 10 - ncol(notblank)), nrow = 1)) # combine with BLANKS
+    }
   }
   
   revrows <- numeric(0) # store the reversable rows
@@ -227,6 +247,19 @@ revrxnrem <- reactive({
     prod <- indprodall[i,][indprodall[i,] != "BLANK"]
     species <- c(react, prod)
     indspecies[i, 1:length(species)] <- species
+    
+    if(sum(duplicated(indspecies[i,])) >= sum(indspecies[i,] == "BLANK")){
+      notblank <- indspecies[i,][indspecies[i,] != "BLANK"]
+      coef <- data.frame(table(notblank), stringsAsFactors = FALSE)
+      newspecies <- paste0(coef$Freq, coef$notblank)
+      for(j in 1:length(newspecies)){
+        if(substr(newspecies[j], 1, 1) == "1"){
+          newspecies[j] <- substr(newspecies[j], 2, nchar(newspecies[j]))
+        }
+      }
+      notblank <- matrix(newspecies, ncol = length(newspecies))
+      indspecies[i,] <- cbind(notblank, matrix(rep("BLANK", 10 - ncol(notblank)), nrow = 1))
+    }
   }
   
   revrows <- numeric(0)
